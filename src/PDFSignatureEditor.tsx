@@ -5,7 +5,6 @@ import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
 import { PDFDocument, rgb } from "pdf-lib";
-// Draggable import removed - using fixed coordinates now
 import SignatureCanvas from "react-signature-canvas";
 import dayjs from "dayjs";
 import { ToastProvider, useToast } from "./contexts/ToastContext";
@@ -68,6 +67,9 @@ export interface PDFSignatureEditorProps {
   /** Callback when user submits the signed PDF */
   onSubmit?: (signedPdfBlob: Blob, documentName: string) => void | Promise<void>;
 
+  /** Enable drag-and-drop mode (alternative to fixed positions) */
+  enableDragDrop?: boolean;
+
   /** Callback when user cancels or exits */
   onCancel?: () => void;
 
@@ -117,17 +119,17 @@ function PDFSignatureEditorInner({
   submitButtonText = "Submit Document",
   resetButtonText = "Reset Document",
   showCancelButton = false,
+  enableDragDrop = false,
 }: PDFSignatureEditorProps) {
   const { showToast } = useToast();
   const [pdf, setPdf] = useState<string | null>(null);
-  const [signatureURL, setSignatureURL] = useState<string | null>(null);
   const [signatureDialogVisible, setSignatureDialogVisible] = useState(false);
   const [pageNum, setPageNum] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
   const [pageDetails, setPageDetails] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [signedPdfBlob, setSignedPdfBlob] = useState<Blob | null>(null);
+  const [modifiedPdfBlob, setModifiedPdfBlob] = useState<Blob | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // History management for undo functionality
@@ -145,6 +147,46 @@ function PDFSignatureEditorInner({
 
   const sigRef = useRef<SignatureCanvas>(null);
 
+  useEffect(() => {
+    console.log("PDFSignatureEditor mounted with props:", {
+      pdfDataProvided: !!pdfData,
+      pdfUrl,
+      documentName,
+      initialSignerName,
+      initialSignerEmail,
+      signaturePosition,
+      namePosition,
+      emailPosition,
+      datePosition,
+      customTextPosition: customTextPositionProp,
+      enableDragDrop,
+      enableCustomText,
+      enableUndo,
+    });
+  }, []);
+
+  // Helper to get current PDF as ArrayBuffer for modification
+  const getCurrentPdfBuffer = async (): Promise<ArrayBuffer> => {
+    if (!pdf) {
+      throw new Error("PDF not loaded");
+    }
+    console.log("Fetching current PDF buffer for modification...");
+    let pdfBuffer: ArrayBuffer;
+    if (pdf.startsWith("data:")) {
+      const base64 = pdf.split(",")[1];
+      pdfBuffer = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer;
+      console.log("Converted data URL to buffer");
+    } else {
+      const response = await fetch(pdf);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF for modification: ${response.status}`);
+      }
+      pdfBuffer = await response.arrayBuffer();
+      console.log("Fetched blob URL as buffer");
+    }
+    return pdfBuffer;
+  };
+
   // Load PDF on mount
   useEffect(() => {
     const loadPDF = async () => {
@@ -155,43 +197,40 @@ function PDFSignatureEditorInner({
         // Priority: pdfData > pdfUrl
         if (pdfData) {
           console.log("📥 Loading PDF from pdfData prop (base64)...");
-          // If pdfData is already a data URL, use it directly
+          let dataUrl: string;
           if (pdfData.startsWith("data:")) {
-            setPdf(pdfData);
-            setOriginalPdf(pdfData);
+            dataUrl = pdfData;
           } else {
-            // Convert base64 to data URL
-            const dataUrl = `data:application/pdf;base64,${pdfData}`;
-            setPdf(dataUrl);
-            setOriginalPdf(dataUrl);
+            dataUrl = `data:application/pdf;base64,${pdfData}`;
           }
+          setPdf(dataUrl);
+          setOriginalPdf(dataUrl);
           console.log("✅ PDF loaded from pdfData");
         } else if (pdfUrl) {
           console.log("📥 Loading PDF from pdfUrl prop...");
+          let url: string;
+          if (pdfUrl.startsWith("blob:")) {
+            url = pdfUrl;
+          } else {
+            const response = await fetch(pdfUrl);
+            if (!response.ok) {
+              throw new Error(`Failed to fetch PDF: ${response.status}`);
+            }
+            const blob = await response.blob();
+            const arrayBuffer = await blob.arrayBuffer();
 
-          // Fetch the PDF and convert to blob
-          const response = await fetch(pdfUrl);
-          if (!response.ok) {
-            throw new Error(`Failed to fetch PDF: ${response.status}`);
+            // Validate PDF header
+            const header = new Uint8Array(arrayBuffer.slice(0, 8));
+            const headerText = new TextDecoder().decode(header);
+            if (!headerText.startsWith("%PDF-")) {
+              throw new Error("Invalid PDF format: Missing PDF header");
+            }
+
+            url = URL.createObjectURL(blob);
           }
-
-          const blob = await response.blob();
-          const arrayBuffer = await blob.arrayBuffer();
-
-          // Validate PDF header
-          const header = new Uint8Array(arrayBuffer.slice(0, 8));
-          const pdfHeader = '%PDF-1.';
-          const headerText = new TextDecoder().decode(header);
-
-          if (!headerText.startsWith(pdfHeader)) {
-            throw new Error('Invalid PDF format: Missing PDF header');
-          }
-
-          // Convert to data URL for display
-          const url = await blobToURL(blob);
           setPdf(url);
           setOriginalPdf(url);
-          console.log("✅ PDF loaded and validated");
+          console.log("✅ PDF loaded and validated from pdfUrl");
         } else {
           throw new Error("No PDF data provided. Please provide either pdfData or pdfUrl prop.");
         }
@@ -211,7 +250,8 @@ function PDFSignatureEditorInner({
   // Save current state to history before making changes
   const saveToHistory = () => {
     if (pdf && enableUndo) {
-      setPdfHistory(prev => [...prev, { pdf, blob: signedPdfBlob }]);
+      console.log("Saving current PDF state to history");
+      setPdfHistory((prev) => [...prev, { pdf, blob: modifiedPdfBlob }]);
     }
   };
 
@@ -222,16 +262,11 @@ function PDFSignatureEditorInner({
       return;
     }
 
-    // Get the last state from history
     const lastState = pdfHistory[pdfHistory.length - 1];
-
-    // Restore the last state
+    console.log("Undoing last action, restoring previous state");
     setPdf(lastState.pdf);
-    setSignedPdfBlob(lastState.blob);
-
-    // Remove the last state from history
-    setPdfHistory(prev => prev.slice(0, -1));
-
+    setModifiedPdfBlob(lastState.blob);
+    setPdfHistory((prev) => prev.slice(0, -1));
     showToast("Last action undone", "success");
   };
 
@@ -241,7 +276,7 @@ function PDFSignatureEditorInner({
       return;
     }
 
-    if (!signaturePosition) {
+    if (!signaturePosition && !enableDragDrop) {
       showToast("Signature position not configured", "error");
       setSignatureDialogVisible(false);
       return;
@@ -250,263 +285,298 @@ function PDFSignatureEditorInner({
     const sigURL = sigRef.current.toDataURL();
     setSignatureDialogVisible(false);
 
-    // Automatically embed signature at fixed coordinates
     if (!pdf) {
       showToast("Please wait for PDF to load", "warning");
       return;
     }
 
     try {
-      console.log("🖊️ Embedding signature at fixed position:", signaturePosition);
-      console.log(sigURL)
-      // Fetch and convert PDF to array buffer if it's a URL
-      let pdfBuffer;
-      if (pdf.startsWith('data:')) {
-        const base64 = pdf.split(',')[1];
-        pdfBuffer = Uint8Array.from(atob(base64), c => c.charCodeAt(0)).buffer;
-      } else {
-        const response = await fetch(pdf);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch PDF for modification: ${response.status}`);
-        }
-        pdfBuffer = await response.arrayBuffer();
-      }
+      console.log("🖊️ Embedding signature at position:", signaturePosition);
+      console.log("Signature data URL:", sigURL);
 
+      const pdfBuffer = await getCurrentPdfBuffer();
       const pdfDoc = await PDFDocument.load(pdfBuffer);
       const pages = pdfDoc.getPages();
 
-      // Use the specified page number
-      const targetPage = pages[signaturePosition.page];
+      const pageIndex = signaturePosition ? signaturePosition.page : 0;
+      const targetPage = pages[pageIndex];
       if (!targetPage) {
-        throw new Error(`Page ${signaturePosition.page} not found`);
+        throw new Error(`Page ${pageIndex + 1} not found`);
       }
 
       // Convert signature data URL to PNG bytes
-      const sigData = sigURL.split(',')[1];
-      const sigBytes = Uint8Array.from(atob(sigData), c => c.charCodeAt(0));
+      const sigData = sigURL.split(",")[1];
+      const sigBytes = Uint8Array.from(atob(sigData), (c) => c.charCodeAt(0));
       const pngImage = await pdfDoc.embedPng(sigBytes);
 
-      // Fixed signature size (adjust as needed)
-      const sigWidth = 120;
-      const sigHeight = 60;
+      // Fixed signature size
+      // === SMART SIGNATURE + TEXT BLOCK WITH AUTO-POSITIONING ===
+      const sigWidth = 130;
+      const sigHeight = 65;
+      const lineHeight = 10; // Space between lines
+      const fontSize = 11.5;
+      const leftPadding = 3; // Slight indent for text under signature
 
-      // Use coordinates directly (PDF points)
+      const x = signaturePosition ? signaturePosition.x : 50;
+      const y = signaturePosition ? signaturePosition.y : targetPage.getHeight() - 150;
+
+      // Draw signature image
       targetPage.drawImage(pngImage, {
-        x: signaturePosition.x,
-        y: signaturePosition.y,
+        x,
+        y,
         width: sigWidth,
         height: sigHeight,
       });
+      console.log("✅ Signature image drawn at", { x, y: y, bottomAt: y + sigHeight, page: pageIndex + 1 });
 
-      // Add timestamp below signature
-      const timestamp = `Signed: ${dayjs().format("MM/DD/YYYY HH:mm")}`;
-      targetPage.drawText(timestamp, {
-        x: signaturePosition.x,
-        y: signaturePosition.y - 15,
-        size: 10,
-        color: rgb(0.3, 0.3, 0.3), // Grey color
+      // Start drawing text BELOW the signature → subtract from Y
+      let currentY = y - sigHeight;  // Bottom of signature
+      let linesAdded = 0;
+
+      // 1. Email (if exists)
+      if (signerEmail?.trim()) {
+        targetPage.drawText(signerEmail.trim(), {
+          x: x + leftPadding,
+          y: currentY - lineHeight * (linesAdded + 1),  // ← GO DOWN
+          size: fontSize,
+          color: rgb(0.05, 0.05, 0.05),
+        });
+        console.log("✅ Email drawn at y:", currentY - lineHeight * (linesAdded + 1));
+        linesAdded++;
+      }
+
+      // 2. Name (if exists)
+      if (signerName?.trim()) {
+        targetPage.drawText(signerName.trim(), {
+          x: x + leftPadding,
+          y: currentY - lineHeight * (linesAdded + 1),
+          size: fontSize,
+          color: rgb(0.05, 0.05, 0.05),
+        });
+        console.log("✅ Name drawn at y:", currentY - lineHeight * (linesAdded + 1));
+        linesAdded++;
+      }
+      // 3. Date & Time (always)
+      const fullDate = `Signed: ${dayjs().format("MMMM D, YYYY [at] h:mm A")}`;
+      targetPage.drawText(fullDate, {
+        x: x + leftPadding,
+        y: currentY - lineHeight * (linesAdded + 1),
+        size: fontSize - 0.5,
+        color: rgb(0.35, 0.35, 0.35),
       });
+      console.log("✅ Date drawn at y:", currentY - lineHeight * (linesAdded + 1));
+      linesAdded++;
+
+      console.log(`✅ Signature block complete: ${linesAdded} line(s) below signature`);
 
       const savedPdfBytes = await pdfDoc.save();
-      const blob = new Blob([new Uint8Array(savedPdfBytes)], { type: 'application/pdf' });
-      const URL = await blobToURL(blob);
+      const blob = new Blob([savedPdfBytes.buffer as ArrayBuffer], { type: "application/pdf" });
+      const url = await blobToURL(blob);
 
-      // Save current state to history before updating
       saveToHistory();
+      setPdf(url);
+      setModifiedPdfBlob(blob);
 
-      // Update the PDF preview and store the signed blob
-      setPdf(URL);
-      setSignedPdfBlob(blob);
-
-      console.log(`✅ Signature embedded at page ${signaturePosition.page}, x:${signaturePosition.x}, y:${signaturePosition.y}`);
-      showToast("Signature embedded successfully!", "success");
-    } catch (error) {
-      console.error("Failed to embed signature:", error);
-      showToast("Failed to embed signature", "error");
+      console.log("✅ Signature embedded successfully");
+      showToast("Signature added successfully!", "success");
+    } catch (err: any) {
+      console.error("❌ Failed to embed signature:", err);
+      showToast("Failed to add signature", "error");
     }
   };
 
   // Handle text field embedding (Name, Email, Date) with fixed coordinates
-  const handleSetTextField = async (fieldType: "name" | "email" | "date") => {
-    if (!pdf) {
-      showToast("Please wait for PDF to load", "warning");
-      return;
-    }
+  // const handleSetTextField = async (fieldType: "name" | "email" | "date") => {
+  //   if (!pdf) {
+  //     showToast("Please wait for PDF to load", "warning");
+  //     return;
+  //   }
 
-    let position: ElementPosition | undefined;
-    let fieldText: string;
+  //   let position: ElementPosition | undefined;
+  //   let fieldText: string;
 
-    if (fieldType === "name") {
-      if (!signerName) {
-        showToast("Please enter your name", "warning");
-        return;
-      }
-      if (!namePosition) {
-        showToast("Name position not configured", "error");
-        return;
-      }
-      position = namePosition;
-      fieldText = signerName;
-    } else if (fieldType === "email") {
-      if (!emailPosition) {
-        showToast("Email position not configured", "error");
-        return;
-      }
-      position = emailPosition;
-      fieldText = signerEmail;
-    } else {
-      if (!datePosition) {
-        showToast("Date position not configured", "error");
-        return;
-      }
-      position = datePosition;
-      fieldText = signingDate;
-    }
+  //   switch (fieldType) {
+  //     case "name":
+  //       if (!signerName) {
+  //         showToast("Please enter your name", "warning");
+  //         return;
+  //       }
+  //       if (!namePosition && !enableDragDrop) {
+  //         showToast("Name position not configured", "error");
+  //         return;
+  //       }
+  //       position = namePosition;
+  //       fieldText = signerName;
+  //       break;
+  //     case "email":
+  //       if (!signerEmail) {
+  //         showToast("Please enter your email", "warning");
+  //         return;
+  //       }
+  //       if (!emailPosition && !enableDragDrop) {
+  //         showToast("Email position not configured", "error");
+  //         return;
+  //       }
+  //       position = emailPosition;
+  //       fieldText = signerEmail;
+  //       break;
+  //     case "date":
+  //       if (!datePosition && !enableDragDrop) {
+  //         showToast("Date position not configured", "error");
+  //         return;
+  //       }
+  //       position = datePosition;
+  //       fieldText = signingDate;
+  //       break;
+  //   }
 
-    try {
-      console.log(`🖊️ Embedding ${fieldType} at fixed position:`, position);
+  //   try {
+  //     console.log(`🖊️ Embedding ${fieldType} field at position:`, position);
 
-      const pdfDoc = await PDFDocument.load(pdf);
-      const pages = pdfDoc.getPages();
+  //     const pdfBuffer = await getCurrentPdfBuffer();
+  //     const pdfDoc = await PDFDocument.load(pdfBuffer);
+  //     const pages = pdfDoc.getPages();
 
-      // Use the specified page number
-      const targetPage = pages[position.page];
-      if (!targetPage) {
-        throw new Error(`Page ${position.page} not found`);
-      }
+  //     const pageIndex = position ? position.page : 0;
+  //     const targetPage = pages[pageIndex];
+  //     if (!targetPage) {
+  //       throw new Error(`Page ${pageIndex + 1} not found`);
+  //     }
 
-      // Use coordinates directly (PDF points)
-      targetPage.drawText(fieldText, {
-        x: position.x,
-        y: position.y,
-        size: 12,
-        color: rgb(0, 0, 0),
-      });
+  //     const x = position ? position.x : 50;
+  //     const y = position
+  //       ? position.y
+  //       : targetPage.getHeight() - 100 - (fieldType === "name" ? 0 : fieldType === "email" ? 20 : 40);
 
-      const pdfBytes = await pdfDoc.save();
-      const blob = new Blob([pdfBytes.buffer as ArrayBuffer], { type: 'application/pdf' });
-      const URL = await blobToURL(blob);
+  //     console.log(`Embedding text "${fieldText}" at page ${pageIndex + 1}, x: ${x}, y: ${y}`);
 
-      // Save current state to history before updating
-      saveToHistory();
+  //     targetPage.drawText(fieldText, {
+  //       x,
+  //       y,
+  //       size: 12,
+  //       color: rgb(0, 0, 0),
+  //     });
 
-      // Update the PDF preview and store the signed blob
-      setPdf(URL);
-      setSignedPdfBlob(blob);
+  //     const savedPdfBytes = await pdfDoc.save();
+  //     const blob = new Blob([savedPdfBytes.buffer as ArrayBuffer], { type: "application/pdf" });
+  //     const url = await blobToURL(blob);
 
-      console.log(`✅ ${fieldType} field embedded at page ${position.page}, x:${position.x}, y:${position.y}`);
-      showToast(`${fieldType.charAt(0).toUpperCase() + fieldType.slice(1)} field added successfully`, "success");
-    } catch (error) {
-      console.error(`Failed to embed ${fieldType} field:`, error);
-      showToast(`Failed to embed ${fieldType} field`, "error");
-    }
-  };
+  //     saveToHistory();
+  //     setPdf(url);
+  //     setModifiedPdfBlob(blob);
+
+  //     console.log(`✅ ${fieldType} field embedded successfully`);
+  //     showToast(`${fieldType.charAt(0).toUpperCase() + fieldType.slice(1)} added successfully`, "success");
+  //   } catch (err: any) {
+  //     console.error(`❌ Failed to embed ${fieldType} field:`, err);
+  //     showToast(`Failed to add ${fieldType} field`, "error");
+  //   }
+  // };
 
   // Handle custom text field embedding with fixed coordinates
-  const handleAddCustomText = async () => {
-    if (!customTextInput.trim()) {
-      showToast("Please enter some text", "warning");
-      return;
-    }
+  // const handleAddCustomText = async () => {
+  //   if (!customTextInput.trim()) {
+  //     showToast("Please enter some text", "warning");
+  //     return;
+  //   }
 
-    if (!customTextPositionProp) {
-      showToast("Custom text position not configured", "error");
-      return;
-    }
+  //   if (!customTextPositionProp && !enableDragDrop) {
+  //     showToast("Custom text position not configured", "error");
+  //     return;
+  //   }
 
-    if (!pdf) {
-      showToast("Please wait for PDF to load", "warning");
-      return;
-    }
+  //   if (!pdf) {
+  //     showToast("Please wait for PDF to load", "warning");
+  //     return;
+  //   }
 
-    try {
-      console.log("🖊️ Embedding custom text at fixed position:", customTextPositionProp);
+  //   try {
+  //     console.log("🖊️ Embedding custom text at position:", customTextPositionProp);
 
-      const pdfDoc = await PDFDocument.load(pdf);
-      const pages = pdfDoc.getPages();
+  //     const pdfBuffer = await getCurrentPdfBuffer();
+  //     const pdfDoc = await PDFDocument.load(pdfBuffer);
+  //     const pages = pdfDoc.getPages();
 
-      // Use the specified page number
-      const targetPage = pages[customTextPositionProp.page];
-      if (!targetPage) {
-        throw new Error(`Page ${customTextPositionProp.page} not found`);
-      }
+  //     const pageIndex = customTextPositionProp ? customTextPositionProp.page : 0;
+  //     const targetPage = pages[pageIndex];
+  //     if (!targetPage) {
+  //       throw new Error(`Page ${pageIndex + 1} not found`);
+  //     }
 
-      // Use coordinates directly (PDF points)
-      targetPage.drawText(customTextInput, {
-        x: customTextPositionProp.x,
-        y: customTextPositionProp.y,
-        size: 12,
-        color: rgb(0, 0, 0),
-      });
+  //     const x = customTextPositionProp ? customTextPositionProp.x : 50;
+  //     const y = customTextPositionProp ? customTextPositionProp.y : targetPage.getHeight() - 200;
 
-      const pdfBytes = await pdfDoc.save();
-      const blob = new Blob([pdfBytes.buffer as ArrayBuffer], { type: 'application/pdf' });
-      const URL = await blobToURL(blob);
+  //     console.log(`Embedding custom text "${customTextInput}" at page ${pageIndex + 1}, x: ${x}, y: ${y}`);
 
-      // Save current state to history before updating
-      saveToHistory();
+  //     targetPage.drawText(customTextInput, {
+  //       x,
+  //       y,
+  //       size: 12,
+  //       color: rgb(0, 0, 0),
+  //     });
 
-      setPdf(URL);
-      setSignedPdfBlob(blob);
-      setCustomTextInput("");
-      setCustomTextDialogVisible(false);
+  //     const savedPdfBytes = await pdfDoc.save();
+  //     const blob = new Blob([savedPdfBytes.buffer as ArrayBuffer], { type: "application/pdf" });
+  //     const url = await blobToURL(blob);
 
-      console.log(`✅ Custom text embedded at page ${customTextPositionProp.page}, x:${customTextPositionProp.x}, y:${customTextPositionProp.y}`);
-      showToast("Custom text added successfully", "success");
-    } catch (error) {
-      console.error("Failed to embed custom text:", error);
-      showToast("Failed to embed custom text", "error");
-    }
-  };
+  //     saveToHistory();
+  //     setPdf(url);
+  //     setModifiedPdfBlob(blob);
+  //     setCustomTextInput("");
+  //     setCustomTextDialogVisible(false);
 
+  //     console.log("✅ Custom text embedded successfully");
+  //     showToast("Custom text added successfully", "success");
+  //   } catch (err: any) {
+  //     console.error("❌ Failed to embed custom text:", err);
+  //     showToast("Failed to add custom text", "error");
+  //   }
+  // };
 
   const handleSubmitSignedDocument = async () => {
-    if (!signedPdfBlob) {
-      showToast("Please add and place a signature first", "warning");
+    if (!modifiedPdfBlob) {
+      showToast("Please add your signature first", "warning");
       return;
     }
-
     setIsSubmitting(true);
-
     try {
-      console.log("📤 Submitting signed PDF...", { documentName, blobSize: signedPdfBlob.size });
+      console.log("📤 Submitting signed PDF to server...");
 
-      /* COMMENTED OUT - API CALL EXAMPLE
-      // Example API integration:
-      const formData = new FormData();
-      formData.append("signedPdf", signedPdfBlob, `${documentName}_signed.pdf`);
-      formData.append("documentName", documentName);
-      formData.append("signerName", signerName);
-      formData.append("signerEmail", signerEmail);
-      formData.append("signedAt", new Date().toISOString());
-
-      const response = await fetch('/api/documents/sign', {
-        method: "POST",
-        headers: {
-          // Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      });
-
-      const data = await response.json();
-
-      if (data.success) {
-        console.log("✅ Document signed successfully!", data);
-        showToast("Document signed and submitted successfully!", "success");
-      } else {
-        throw new Error(data.error || "Failed to submit signed document");
-      }
-      */
-
-      // Call the onSubmit callback if provided
       if (onSubmit) {
-        await onSubmit(signedPdfBlob, documentName);
+        await onSubmit(modifiedPdfBlob, documentName);
       }
+      else {
+        // === DEFAULT: Send to your API ===
+        const formData = new FormData();
+        const filename = `${documentName}_signed_${dayjs().format("YYYYMMDD_HHmm")}.pdf`;
+        formData.append("file", modifiedPdfBlob, filename);
+        formData.append("documentName", documentName);
+        formData.append("signerName", signerName);
+        formData.append("signerEmail", signerEmail);
+        const documentId = "f05f10ee-a9db-40a7-a63d-bfd7e65409ec";
+        const backendURL = `http://localhost:5000/api/documents/${documentId}/sign`;
+        const token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIwZmI3ZDU0Yi01YzRlLTQyMmUtYmI1ZS1lOTFiODI5ZmMyNDIiLCJyb2xlIjoiU0lHTkVSIiwiaWF0IjoxNzYyNTk1NTAyLCJleHAiOjE3NjMyMDAzMDJ9.hL6EQmXwRxtS4JOc3S9-g2geCaO4EDrnYt-AYpj6P8I';
+        const response = await fetch(backendURL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            // Don't set Content-Type - let browser set it with boundary for FormData
+          },
+          body: formData,
+        });
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Server error: ${response.status} ${errorText}`);
+        }
+        const result = await response.json();
+        console.log("✅ PDF saved successfully:", result);
+        showToast("Document saved successfully!", "success");
 
-      console.log("✅ Document submission complete!");
-      showToast("Document signed and submitted successfully!", "success");
+        console.log("✅ Document submission complete!");
+        showToast("Document submitted successfully!", "success");
+      }
     } catch (error: any) {
-      console.error("❌ Failed to submit signed document:", error);
+      console.error("❌ Failed to submit document:", error);
       showToast(`Failed to submit: ${error.message}`, "error");
     } finally {
       setIsSubmitting(false);
@@ -515,9 +585,9 @@ function PDFSignatureEditorInner({
 
   const handleReset = () => {
     if (originalPdf) {
+      console.log("Resetting document to original state");
       setPdf(originalPdf);
-      setSignedPdfBlob(null);
-      setSignatureURL(null);
+      setModifiedPdfBlob(null);
       setPdfHistory([]);
       setPageNum(0);
       showToast("Document reset to original state", "info");
@@ -588,7 +658,7 @@ function PDFSignatureEditorInner({
       )}
 
       {/* Custom Text Dialog */}
-      {customTextDialogVisible && enableCustomText && (
+      {/* {customTextDialogVisible && enableCustomText && (
         <div className="fixed inset-0 flex items-center justify-center z-50">
           <div
             className="absolute inset-0 bg-black bg-opacity-50"
@@ -625,7 +695,7 @@ function PDFSignatureEditorInner({
             </div>
           </div>
         </div>
-      )}
+      )} */}
 
       {/* Two Column Layout: PDF Viewer (Left) + Controls Sidebar (Right) */}
       {pdf && (
@@ -644,10 +714,11 @@ function PDFSignatureEditorInner({
                     onLoadSuccess={(data) => {
                       setTotalPages(data.numPages);
                       onLoadSuccess?.(data.numPages);
+                      console.log("PDF loaded successfully with", data.numPages, "pages");
                     }}
-                    onLoadError={(error) => {
-                      console.error("PDF load error:", error);
-                      onLoadError?.(error);
+                    onLoadError={(err) => {
+                      console.error("PDF load error:", err);
+                      onLoadError?.(err);
                     }}
                   >
                     <Page
@@ -722,74 +793,74 @@ function PDFSignatureEditorInner({
                 </div>
               </div>
 
-              {/* Signature Button - Full Width */}
-              {!signatureURL && !signedPdfBlob && (
-                <button onClick={() => setSignatureDialogVisible(true)} disabled={!signaturePosition} className="w-full flex items-center justify-center gap-3 py-4 px-4 bg-white hover:bg-gray-50 border-2 border-gray-300 hover:border-gray-400 rounded-lg transition-all shadow-sm mb-4 group disabled:opacity-50 disabled:cursor-not-allowed" title={signaturePosition ? "Add Signature" : "Signature position not configured"}>
-                  <svg className="w-12 h-12 flex-shrink-0 text-gray-700" viewBox="0 0 120 100" fill="none">
-                    <path d="M15 55 Q25 45, 35 52 T55 48 Q65 45, 75 52 L85 58" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.7" />
-                    <g transform="translate(85, 30) rotate(45)">
-                      <rect x="0" y="0" width="8" height="32" rx="1" fill="currentColor" opacity="0.95" />
-                      <rect x="0" y="8" width="8" height="2" fill="currentColor" opacity="0.6" />
-                      <path d="M 2 32 L 4 38 L 6 32 Z" fill="currentColor" opacity="0.95" />
-                      <line x1="4" y1="38" x2="4" y2="42" stroke="currentColor" strokeWidth="1.5" opacity="0.9" />
-                      <line x1="4" y1="38" x2="4" y2="32" stroke="white" strokeWidth="0.5" opacity="0.5" />
-                    </g>
-                  </svg>
-                  <span className="text-base font-semibold text-gray-800 tracking-wide">Add Your Signature</span>
-                </button>
-              )}
-
-              {signedPdfBlob && !signatureURL && (
-                <button onClick={() => setSignatureDialogVisible(true)} disabled={!signaturePosition} className="w-full flex items-center justify-center gap-3 py-4 px-4 bg-white hover:bg-gray-50 border-2 border-gray-300 hover:border-gray-400 rounded-lg transition-all shadow-sm mb-4 group disabled:opacity-50 disabled:cursor-not-allowed" title={signaturePosition ? "Add Another Signature" : "Signature position not configured"}>
-                  <svg className="w-12 h-12 flex-shrink-0 text-gray-700" viewBox="0 0 120 100" fill="none">
-                    <path d="M15 55 Q25 45, 35 52 T55 48 Q65 45, 75 52 L85 58" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.7" />
-                    <g transform="translate(85, 30) rotate(45)">
-                      <rect x="0" y="0" width="8" height="32" rx="1" fill="currentColor" opacity="0.95" />
-                      <rect x="0" y="8" width="8" height="2" fill="currentColor" opacity="0.6" />
-                      <path d="M 2 32 L 4 38 L 6 32 Z" fill="currentColor" opacity="0.95" />
-                      <line x1="4" y1="38" x2="4" y2="42" stroke="currentColor" strokeWidth="1.5" opacity="0.9" />
-                      <line x1="4" y1="38" x2="4" y2="32" stroke="white" strokeWidth="0.5" opacity="0.5" />
-                    </g>
-                    <circle cx="25" cy="25" r="10" fill="currentColor" opacity="0.3" />
-                    <line x1="18" y1="25" x2="32" y2="25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-                    <line x1="25" y1="18" x2="25" y2="32" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-                  </svg>
-                  <span className="text-base font-semibold text-gray-800 tracking-wide">Add Another Signature</span>
-                </button>
-              )}
+              {/* Signature Button - Always show if enabled */}
+              <button
+                onClick={() => setSignatureDialogVisible(true)}
+                disabled={!signaturePosition && !enableDragDrop}
+                className="w-full flex items-center justify-center gap-3 py-4 px-4 bg-white hover:bg-gray-50 border-2 border-gray-300 hover:border-gray-400 rounded-lg transition-all shadow-sm mb-4 group disabled:opacity-50 disabled:cursor-not-allowed"
+                title={(signaturePosition || enableDragDrop) ? "Add Signature" : "Signature position not configured"}
+              >
+                <svg className="w-12 h-12 flex-shrink-0 text-gray-700" viewBox="0 0 120 100" fill="none">
+                  <path d="M15 55 Q25 45, 35 52 T55 48 Q65 45, 75 52 L85 58" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.7" />
+                  <g transform="translate(85, 30) rotate(45)">
+                    <rect x="0" y="0" width="8" height="32" rx="1" fill="currentColor" opacity="0.95" />
+                    <rect x="0" y="8" width="8" height="2" fill="currentColor" opacity="0.6" />
+                    <path d="M 2 32 L 4 38 L 6 32 Z" fill="currentColor" opacity="0.95" />
+                    <line x1="4" y1="38" x2="4" y2="42" stroke="currentColor" strokeWidth="1.5" opacity="0.9" />
+                    <line x1="4" y1="38" x2="4" y2="32" stroke="white" strokeWidth="0.5" opacity="0.5" />
+                  </g>
+                </svg>
+                <span className="text-base font-semibold text-gray-800 tracking-wide">Add Signature</span>
+              </button>
 
               <div className="grid grid-cols-2 gap-3">
                 {/* Text Field Buttons - Direct embedding with fixed coordinates */}
-                {pdf && !signatureURL && (
-                  <>
-                    <button onClick={() => handleSetTextField("name")} disabled={!namePosition} className="flex flex-col items-center justify-center p-4 bg-gray-50 hover:bg-gray-100 border-2 border-gray-200 rounded-lg transition-colors group disabled:opacity-50 disabled:cursor-not-allowed" title={namePosition ? "Add Name" : "Name position not configured"}>
-                      <svg className="w-8 h-8 text-gray-600 group-hover:text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                      </svg>
-                      <span className="text-xs font-medium text-gray-700">Name</span>
-                    </button>
-                    <button onClick={() => handleSetTextField("email")} disabled={!emailPosition} className="flex flex-col items-center justify-center p-4 bg-gray-50 hover:bg-gray-100 border-2 border-gray-200 rounded-lg transition-colors group disabled:opacity-50 disabled:cursor-not-allowed" title={emailPosition ? "Add Email" : "Email position not configured"}>
-                      <svg className="w-8 h-8 text-gray-600 group-hover:text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                      </svg>
-                      <span className="text-xs font-medium text-gray-700">Email</span>
-                    </button>
-                    <button onClick={() => handleSetTextField("date")} disabled={!datePosition} className="flex flex-col items-center justify-center p-4 bg-gray-50 hover:bg-gray-100 border-2 border-gray-200 rounded-lg transition-colors group disabled:opacity-50 disabled:cursor-not-allowed" title={datePosition ? "Add Date" : "Date position not configured"}>
-                      <svg className="w-8 h-8 text-gray-600 group-hover:text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                      </svg>
-                      <span className="text-xs font-medium text-gray-700">Date</span>
-                    </button>
-                    {enableCustomText && (
-                      <button onClick={() => setCustomTextDialogVisible(true)} disabled={!customTextPositionProp} className="flex flex-col items-center justify-center p-4 bg-gray-50 hover:bg-gray-100 border-2 border-gray-200 rounded-lg transition-colors group disabled:opacity-50 disabled:cursor-not-allowed" title={customTextPositionProp ? "Add Custom Text" : "Custom text position not configured"}>
-                        <svg className="w-8 h-8 text-gray-600 group-hover:text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                        </svg>
-                        <span className="text-xs font-medium text-gray-700">Text</span>
-                      </button>
-                    )}
-                  </>
-                )}
+                {/* <button
+                  onClick={() => handleSetTextField("name")}
+                  disabled={!namePosition && !enableDragDrop}
+                  className="flex flex-col items-center justify-center p-4 bg-gray-50 hover:bg-gray-100 border-2 border-gray-200 rounded-lg transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={(namePosition || enableDragDrop) ? "Add Name" : "Name position not configured"}
+                >
+                  <svg className="w-8 h-8 text-gray-600 group-hover:text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
+                  <span className="text-xs font-medium text-gray-700">Name</span>
+                </button>
+                <button
+                  onClick={() => handleSetTextField("email")}
+                  disabled={!emailPosition && !enableDragDrop}
+                  className="flex flex-col items-center justify-center p-4 bg-gray-50 hover:bg-gray-100 border-2 border-gray-200 rounded-lg transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={(emailPosition || enableDragDrop) ? "Add Email" : "Email position not configured"}
+                >
+                  <svg className="w-8 h-8 text-gray-600 group-hover:text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                  <span className="text-xs font-medium text-gray-700">Email</span>
+                </button>
+                <button
+                  onClick={() => handleSetTextField("date")}
+                  disabled={!datePosition && !enableDragDrop}
+                  className="flex flex-col items-center justify-center p-4 bg-gray-50 hover:bg-gray-100 border-2 border-gray-200 rounded-lg transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={(datePosition || enableDragDrop) ? "Add Date" : "Date position not configured"}
+                >
+                  <svg className="w-8 h-8 text-gray-600 group-hover:text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                  <span className="text-xs font-medium text-gray-700">Date</span>
+                </button>
+                {enableCustomText && (
+                  <button
+                    onClick={() => setCustomTextDialogVisible(true)}
+                    disabled={!customTextPositionProp && !enableDragDrop}
+                    className="flex flex-col items-center justify-center p-4 bg-gray-50 hover:bg-gray-100 border-2 border-gray-200 rounded-lg transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={(customTextPositionProp || enableDragDrop) ? "Add Custom Text" : "Custom text position not configured"}
+                  >
+                    <svg className="w-8 h-8 text-gray-600 group-hover:text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                    <span className="text-xs font-medium text-gray-700">Text</span>
+                  </button>
+                )} */}
 
                 {/* Undo Button */}
                 {enableUndo && pdfHistory.length > 0 && (
@@ -806,14 +877,16 @@ function PDFSignatureEditorInner({
             {/* Fixed Bottom Action Buttons */}
             <div className="border-t border-gray-200 p-4 bg-gray-50 space-y-2">
               {/* Submit Button */}
-              {signedPdfBlob && !signatureURL && (
-                <button onClick={handleSubmitSignedDocument} disabled={isSubmitting} className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <span className="font-medium">{isSubmitting ? "Submitting..." : submitButtonText}</span>
-                </button>
-              )}
+              <button
+                onClick={handleSubmitSignedDocument}
+                disabled={isSubmitting || !modifiedPdfBlob}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="font-medium">{isSubmitting ? "Submitting..." : submitButtonText}</span>
+              </button>
 
               {/* Cancel Button */}
               {showCancelButton && onCancel && (
@@ -826,7 +899,7 @@ function PDFSignatureEditorInner({
               )}
 
               {/* Reset Button - Only show if there's something to reset */}
-              {(signedPdfBlob || pdfHistory.length > 0) && (
+              {(modifiedPdfBlob || pdfHistory.length > 0) && (
                 <button onClick={handleReset} className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-colors shadow-sm">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
