@@ -1,6 +1,6 @@
 {
   "name": "@mufaddalpam/pdf-signature-editor",
-  "version": "1.1.1",
+  "version": "1.3.1",
   "description": "A React component for adding signatures and fields to PDF documents",
   "author": "Mufaddal",
   "type": "module",

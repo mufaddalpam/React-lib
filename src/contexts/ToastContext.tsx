@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react';
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
 
@@ -28,19 +28,17 @@ interface ToastProviderProps {
 
 export const ToastProvider = ({ children }: ToastProviderProps) => {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [idCounter, setIdCounter] = useState(0);
+  const idCounterRef = useRef(0);
 
   const showToast = useCallback((message: string, type: ToastType) => {
-    const id = idCounter;
-    setIdCounter(prev => prev + 1);
-
+    const id = idCounterRef.current++;
     setToasts(prev => [...prev, { id, message, type }]);
 
     // Auto-remove toast after 4 seconds
     setTimeout(() => {
       setToasts(prev => prev.filter(toast => toast.id !== id));
     }, 4000);
-  }, [idCounter]);
+  }, []);
 
   const removeToast = (id: number) => {
     setToasts(prev => prev.filter(toast => toast.id !== id));

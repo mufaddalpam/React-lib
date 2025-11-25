@@ -24,28 +24,32 @@ import { PDFSignatureEditor } from '@mufaddalpam/pdf-signature-editor';
 import '@mufaddalpam/pdf-signature-editor/dist/styles.css';
 
 function App() {
+  async function getToken() {
+    // throw new Error('Function not implemented.');
+    return 'token';
+  }
   return (
     <PDFSignatureEditor
-          pdfUrl="/pdf2.pdf"
-          documentName="signed-document.pdf"
-          signerName="John Doe"
-          signerEmail="john@example.com"
-          signaturePosition={{ x: 400, y: 10, page: 0 }}
-          namePosition={{ x: 100, y: 600, page: 0 }}
-          emailPosition={{ x: 100, y: 650, page: 0 }}
-          datePosition={{ x: 400, y: 600, page: 0 }}
-          onSubmit={handleSubmit}
-          onCancel={() => setShowEditor(false)}
-          onLoadSuccess={(numPages) => console.log(`PDF loaded, ${numPages} pages`)}
-          onLoadError={(error) => console.error('Failed to load PDF:', error)}
-          enableCustomText={true}
-          enableUndo={true}
-          showCancelButton={true}
-          submitButtonText="Sign & Download"
-          resetButtonText="Start Over"
-        />
-  );
-}
+							templateId="691f1720147e4400ca6f9b0b"
+							documentName="Employment Agreement 202"
+							signerName="mufaddal C"
+							signerEmail="mufaddal12@example.com"
+							showSignerName
+							showSignerEmail
+							showSigningDate
+							onSuccess={handleSuccess}
+							onAllPagesRendered={() => {
+								const el = scrollRef.current;
+								if (!el) return;
+
+								// Scroll to bottom when all pages are rendered
+								el.scrollTo({
+									top: el.scrollHeight * 0.9,
+									behavior: 'smooth',
+								});
+							}}
+		/>
+);}
 ```
 
 

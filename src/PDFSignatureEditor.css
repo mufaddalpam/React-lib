@@ -1,3 +1,5 @@
+@import "react-pdf/dist/Page/AnnotationLayer.css";
+@import "react-pdf/dist/Page/TextLayer.css";
 @import 'tailwindcss/base';
 @import 'tailwindcss/components';
 @import 'tailwindcss/utilities';
@@ -68,4 +70,14 @@
 
 .btn-outline:hover {
     background-color: rgb(249 250 251);
+}
+
+.pdf-editor-container .react-pdf__Document,
+.pdf-editor-container .react-pdf__Page {
+    max-width: 100%;
+}
+
+.pdf-editor-container .react-pdf__Page canvas {
+    max-width: 100% !important;
+    height: auto !important;
 }

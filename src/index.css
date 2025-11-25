@@ -40,6 +40,10 @@
     background-color: #1d4ed8;
 }
 
+/* .pageWrapper {
+    scroll-margin-top: 64px;
+} */
+
 .btn-secondary {
     padding: 0.5rem 1rem;
     background-color: #e5e7eb;
