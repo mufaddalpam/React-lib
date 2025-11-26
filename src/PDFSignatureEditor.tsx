@@ -170,7 +170,16 @@ function PDFSignatureEditorInner({
 
     const hydrateSignatureTargets = async () => {
       try {
-        const remoteTargets = await fetchSignaturePositions(fetchConfig, templateId);
+        if (!currentPdfBlob) return;
+
+        const pdfBytes = await currentPdfBlob.arrayBuffer();
+        const pdfDoc = await PDFDocument.load(pdfBytes);
+        const firstPage = pdfDoc.getPages()[0];
+        const { width: actualPageWidth, height: actualPageHeight } = firstPage.getSize();
+        const remoteTargets = await fetchSignaturePositions(fetchConfig, templateId, {
+          width: actualPageWidth,
+          height: actualPageHeight,
+        });
         if (isCancelled) return;
         setMetadataTargets(bucketizeMetadataTargets(remoteTargets));
         const remoteSignatureTargets = remoteTargets.filter(
@@ -202,6 +211,7 @@ function PDFSignatureEditorInner({
     fetchConfig?.headers,
     fetchConfig?.getAuthHeaders,
     stableShowToast,
+    currentPdfBlob,
   ]);
 
   const hasSignatureTargets = signatureTargets.length > 0;
@@ -450,6 +460,212 @@ function PDFSignatureEditorInner({
 
   const pageWidth = Math.min(PDF_BASE_WIDTH * zoom, availableWidth);
 
+  // const handleAddSignature = useCallback(async () => {
+  //   if (!sigRef.current || sigRef.current.isEmpty()) {
+  //     stableShowToast("Please draw your signature", "warning");
+  //     return;
+  //   }
+  //   if (!hasSignatureTargets) {
+  //     stableShowToast("Signature positions not set", "error");
+  //     return;
+  //   }
+  //   if (!currentPdfBlob) {
+  //     stableShowToast("PDF not loaded yet", "error");
+  //     return;
+  //   }
+
+  //   // console.groupCollapsed("[handleAddSignature] Placement inputs");
+  //   // console.table(
+  //   //   signatureTargets.map((target, index) => ({
+  //   //     index,
+  //   //     type: target.type ?? "SIGNATURE",
+  //   //     page: target.page,
+  //   //     x: target.x,
+  //   //     y: target.y,
+  //   //     width: target.width,
+  //   //     height: target.height,
+  //   //   }))
+  //   // );
+  //   const metadataRows = (Object.keys(metadataTargets) as MetadataFieldType[]).flatMap((key) =>
+  //     metadataTargets[key].map((target, index) => ({
+  //       field: key,
+  //       index,
+  //       page: target.page,
+  //       x: target.x,
+  //       y: target.y,
+  //       width: target.width,
+  //       height: target.height,
+  //     }))
+  //   );
+  //   if (metadataRows.length > 0) {
+  //     console.table(metadataRows);
+  //   } else {
+  //     console.log("[handleAddSignature] No metadata coordinate targets available");
+  //   }
+  //   console.groupEnd();
+
+  //   try {
+  //     saveToHistory();
+  //     const pdfBytes = await currentPdfBlob.arrayBuffer();
+  //     const pdfDoc = await PDFDocument.load(pdfBytes);
+  //     const pages = pdfDoc.getPages();
+  //     const signaturePages = signatureTargets.map((target) => {
+  //       const desiredIndex = target.page >= 1 ? target.page - 1 : target.page;
+  //       const page = pages[desiredIndex];
+  //       if (!page) {
+  //         throw new Error(`Invalid signature page index ${target.page}`);
+  //       }
+  //       // ✅ GET ACTUAL PAGE DIMENSIONS
+  //       const { width: pageWidth, height: pageHeight } = page.getSize();
+
+  //       // ✅ SCALE COORDINATES FROM REFERENCE TO ACTUAL PAGE SIZE
+  //       const COORDINATE_REFERENCE_WIDTH = 600;
+  //       // Assume a letter-sized aspect ratio to derive the matching height for the normalized viewport.
+  //       const LETTER_ASPECT_RATIO = 11 / 8.5;
+  //       const COORDINATE_REFERENCE_HEIGHT = COORDINATE_REFERENCE_WIDTH * LETTER_ASPECT_RATIO;
+
+  //       const scaleX = pageWidth / COORDINATE_REFERENCE_WIDTH;
+  //       const scaleY = pageHeight / COORDINATE_REFERENCE_HEIGHT;
+
+  //       const scaledTarget = {
+  //         ...target,
+  //         x: target.x * scaleX,
+  //         y: target.y * scaleY,
+  //         width: target.width ? target.width * scaleX : undefined,
+  //         height: target.height ? target.height * scaleY : undefined,
+  //       };
+  //       return { target, page };
+  //     });
+  //     const signatureData = sigRef.current.toDataURL("image/png");
+  //     const embeddedImage = await pdfDoc.embedPng(signatureData);
+  //     const signatureDrawLog: Array<{
+  //       type: ElementPosition["type"];
+  //       page: number;
+  //       x: number;
+  //       y: number;
+  //       width?: number;
+  //       height?: number;
+  //       renderedWidth: number;
+  //       renderedHeight: number;
+  //     }> = [];
+  //     signaturePages.forEach(({ target, page }) => {
+  //       const scaled = embeddedImage.scaleToFit(
+  //         target.width ?? SIGNATURE_DEFAULT_WIDTH,
+  //         target.height ?? SIGNATURE_DEFAULT_HEIGHT
+  //       );
+
+  //       page.drawImage(embeddedImage, {
+  //         x: target.x,
+  //         y: target.y,
+  //         width: scaled.width,
+  //         height: scaled.height,
+  //       });
+  //       signatureDrawLog.push({
+  //         type: target.type ?? "SIGNATURE",
+  //         page: target.page,
+  //         x: target.x,
+  //         y: target.y,
+  //         width: target.width,
+  //         height: target.height,
+  //         renderedWidth: scaled.width,
+  //         renderedHeight: scaled.height,
+  //       });
+  //     });
+  //     // console.groupCollapsed("[handleAddSignature] Signature draw details");
+  //     // console.table(signatureDrawLog);
+  //     // console.groupEnd();
+
+  //     const dateLabel = dayjs().format("MM/DD/YYYY");
+  //     const trimmedName = signerName?.trim();
+  //     const trimmedEmail = signerEmail?.trim();
+  //     const shouldAutoName = showSignerName && !!trimmedName;
+  //     const shouldAutoEmail = showSignerEmail && !!trimmedEmail;
+  //     const shouldAutoDate = showSigningDate;
+  //     const shouldRenderAutoMetadata =
+  //       hasSignatureTargets && (shouldAutoName || shouldAutoEmail || shouldAutoDate);
+  //     const dateLine = shouldAutoDate ? dateLabel : undefined;
+
+  //     let placedMetadataViaCoordinates = false;
+  //     if (shouldRenderAutoMetadata) {
+  //       const placements: Array<{ type: MetadataFieldType; enabled: boolean; text?: string }> = [
+  //         { type: "NAME", enabled: shouldAutoName, text: trimmedName },
+  //         { type: "EMAIL", enabled: shouldAutoEmail, text: trimmedEmail },
+  //         { type: "DATE", enabled: shouldAutoDate, text: dateLine },
+  //       ];
+  //       const metadataDrawLog: Array<{
+  //         field: MetadataFieldType;
+  //         targetIndex: number;
+  //         page: number;
+  //         x: number;
+  //         y: number;
+  //         width?: number;
+  //         height?: number;
+  //         text?: string;
+  //       }> = [];
+  //       placements.forEach(({ type, enabled, text }) => {
+  //         if (!enabled || !text) return;
+  //         const targets = metadataTargets[type];
+  //         if (!targets || targets.length === 0) return;
+  //         targets.forEach((target, index) => {
+  //           drawTextAtPosition(pages, text, target);
+  //           metadataDrawLog.push({
+  //             field: type,
+  //             targetIndex: index,
+  //             page: target.page,
+  //             x: target.x,
+  //             y: target.y,
+  //             width: target.width,
+  //             height: target.height,
+  //             text,
+  //           });
+  //         });
+  //         placedMetadataViaCoordinates = true;
+  //       });
+  //       // if (metadataDrawLog.length > 0) {
+  //       //   console.groupCollapsed("[handleAddSignature] Metadata draw details");
+  //       //   console.table(metadataDrawLog);
+  //       //   console.groupEnd();
+  //       // }
+  //     }
+
+  //     if (shouldRenderAutoMetadata && !placedMetadataViaCoordinates) {
+  //       console.log(
+  //         "[handleAddSignature] Falling back to metadata block drawing under signature targets"
+  //       );
+  //       signaturePages.forEach(({ target, page }) => {
+  //         drawFallbackMetadataBlock(page, target, {
+  //           signerName: shouldAutoName ? trimmedName : undefined,
+  //           signerEmail: shouldAutoEmail ? trimmedEmail : undefined,
+  //           dateLabel: dateLine,
+  //         });
+  //       });
+  //     }
+
+  //     const updatedBytes = await pdfDoc.save();
+  //     const updatedBlob = new Blob([updatedBytes as BlobPart], { type: "application/pdf" });
+  //     applyBlob(updatedBlob);
+  //     sigRef.current.clear();
+  //     setHasSignature(true);
+  //     stableShowToast("Signature added!", "success");
+  //   } catch (err: any) {
+  //     stableShowToast(err?.message || "Failed to add signature", "error");
+  //     console.error(err);
+  //   }
+  // }, [
+  //   currentPdfBlob,
+  //   signatureTargets,
+  //   hasSignatureTargets,
+  //   signerName,
+  //   signerEmail,
+  //   showSignerName,
+  //   showSignerEmail,
+  //   showSigningDate,
+  //   metadataTargets,
+  //   applyBlob,
+  //   saveToHistory,
+  //   stableShowToast,
+  // ]);
+
   const handleAddSignature = useCallback(async () => {
     if (!sigRef.current || sigRef.current.isEmpty()) {
       stableShowToast("Please draw your signature", "warning");
@@ -464,18 +680,6 @@ function PDFSignatureEditorInner({
       return;
     }
 
-    // console.groupCollapsed("[handleAddSignature] Placement inputs");
-    // console.table(
-    //   signatureTargets.map((target, index) => ({
-    //     index,
-    //     type: target.type ?? "SIGNATURE",
-    //     page: target.page,
-    //     x: target.x,
-    //     y: target.y,
-    //     width: target.width,
-    //     height: target.height,
-    //   }))
-    // );
     const metadataRows = (Object.keys(metadataTargets) as MetadataFieldType[]).flatMap((key) =>
       metadataTargets[key].map((target, index) => ({
         field: key,
@@ -499,14 +703,17 @@ function PDFSignatureEditorInner({
       const pdfBytes = await currentPdfBlob.arrayBuffer();
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const pages = pdfDoc.getPages();
+
       const signaturePages = signatureTargets.map((target) => {
         const desiredIndex = target.page >= 1 ? target.page - 1 : target.page;
         const page = pages[desiredIndex];
         if (!page) {
           throw new Error(`Invalid signature page index ${target.page}`);
         }
+
         return { target, page };
       });
+
       const signatureData = sigRef.current.toDataURL("image/png");
       const embeddedImage = await pdfDoc.embedPng(signatureData);
       const signatureDrawLog: Array<{
@@ -519,6 +726,7 @@ function PDFSignatureEditorInner({
         renderedWidth: number;
         renderedHeight: number;
       }> = [];
+
       signaturePages.forEach(({ target, page }) => {
         const scaled = embeddedImage.scaleToFit(
           target.width ?? SIGNATURE_DEFAULT_WIDTH,
@@ -531,6 +739,7 @@ function PDFSignatureEditorInner({
           width: scaled.width,
           height: scaled.height,
         });
+
         signatureDrawLog.push({
           type: target.type ?? "SIGNATURE",
           page: target.page,
@@ -542,9 +751,6 @@ function PDFSignatureEditorInner({
           renderedHeight: scaled.height,
         });
       });
-      // console.groupCollapsed("[handleAddSignature] Signature draw details");
-      // console.table(signatureDrawLog);
-      // console.groupEnd();
 
       const dateLabel = dayjs().format("MM/DD/YYYY");
       const trimmedName = signerName?.trim();
@@ -592,11 +798,6 @@ function PDFSignatureEditorInner({
           });
           placedMetadataViaCoordinates = true;
         });
-        // if (metadataDrawLog.length > 0) {
-        //   console.groupCollapsed("[handleAddSignature] Metadata draw details");
-        //   console.table(metadataDrawLog);
-        //   console.groupEnd();
-        // }
       }
 
       if (shouldRenderAutoMetadata && !placedMetadataViaCoordinates) {
@@ -636,6 +837,8 @@ function PDFSignatureEditorInner({
     saveToHistory,
     stableShowToast,
   ]);
+
+
 
   const handleSubmit = useCallback(async () => {
     if (!modifiedPdfBlob) {
@@ -839,3 +1042,4 @@ export default function PDFSignatureEditor(props: PDFSignatureEditorProps) {
 }
 
 export { PDFSignatureEditor };
+

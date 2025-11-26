@@ -8,7 +8,7 @@ const TEXT_SECONDARY = rgb(0.35, 0.35, 0.35);
 const COORDINATE_REFERENCE_WIDTH = 600;
 // Assume a letter-sized aspect ratio to derive the matching height for the normalized viewport.
 const LETTER_ASPECT_RATIO = 11 / 8.5;
-const COORDINATE_REFERENCE_HEIGHT = 2544;//COORDINATE_REFERENCE_WIDTH * LETTER_ASPECT_RATIO;
+const COORDINATE_REFERENCE_HEIGHT = COORDINATE_REFERENCE_WIDTH * LETTER_ASPECT_RATIO;
 // console.log("COORDINATE_REFERENCE_HEIGHT: ", COORDINATE_REFERENCE_HEIGHT)
 
 type HeaderMap = Record<string, string>;
@@ -376,35 +376,87 @@ export async function submitSignedPdfToDocument(options: {
     }
     return json;
 }
-export async function fetchSignaturePositions(fetchConfig: FetchConfig | undefined, templateId: string): Promise<ElementPosition[]> {
+// export async function fetchSignaturePositions(fetchConfig: FetchConfig | undefined, templateId: string): Promise<ElementPosition[]> {
+//     if (!templateId) throw new Error("templateId is required to fetch signature positions");
+
+//     const response = await authedFetch(API_ENDPOINTS.ALL_COORDINATES(templateId), fetchConfig, {
+//         method: "GET",
+//         headers: { "Content-Type": "application/json" },
+//         // body: JSON.stringify({ templateId }),
+//     });
+
+//     const payload = (await readJson(response)) as CoordinatesApiResponse;
+//     if (!response.ok || payload?.success === false) {
+//         throw new Error(payload?.error || "Failed to fetch signature positions");
+//     }
+//     // console.log(payload);
+
+
+//     const entries = Array.isArray(payload?.data) ? payload.data : [];
+//     // console.log(entries);
+
+//     return entries.map(({ x, y, width, height, pageNumber, type }) => {
+//         const absoluteX = percentToPoint(x, COORDINATE_REFERENCE_WIDTH);
+//         const absoluteY = percentToPoint(y, COORDINATE_REFERENCE_HEIGHT);
+//         console.log("data: " + absoluteY, COORDINATE_REFERENCE_HEIGHT)
+
+//         return {
+//             x: absoluteX,
+//             y: absoluteY,
+//             width,
+//             height,
+//             page: pageNumber ?? 1,
+//             type,
+//         };
+//     });
+// }
+
+type PageMetrics = {
+    width: number;
+    height: number;
+};
+
+export async function fetchSignaturePositions(fetchConfig: FetchConfig | undefined, templateId: string, pageMetrics?: PageMetrics): Promise<ElementPosition[]> {
     if (!templateId) throw new Error("templateId is required to fetch signature positions");
 
     const response = await authedFetch(API_ENDPOINTS.ALL_COORDINATES(templateId), fetchConfig, {
         method: "GET",
         headers: { "Content-Type": "application/json" },
-        // body: JSON.stringify({ templateId }),
     });
 
     const payload = (await readJson(response)) as CoordinatesApiResponse;
     if (!response.ok || payload?.success === false) {
         throw new Error(payload?.error || "Failed to fetch signature positions");
     }
-    // console.log(payload);
-
 
     const entries = Array.isArray(payload?.data) ? payload.data : [];
-    // console.log(entries);
+    console.log('API Response Y values:', entries.map(e => ({ type: e.type, y: e.y })));
+    console.log('Reference height:', COORDINATE_REFERENCE_HEIGHT);
+    console.log('Converted Y:', entries.map(e => ({
+        type: e.type,
+        originalY: e.y,
+        fromBottom: 100 - e.y,
+        absolute: percentToPoint(e.y, COORDINATE_REFERENCE_HEIGHT)
+    })));
+    const referenceWidth = pageMetrics?.width ?? COORDINATE_REFERENCE_WIDTH;
+    const referenceHeight = pageMetrics?.height ?? COORDINATE_REFERENCE_HEIGHT;
+
+    const normalizeDimension = (value: number | undefined, span: number): number | undefined => {
+        if (typeof value !== "number" || Number.isNaN(value)) return undefined;
+        if (value > 100) return value;
+        return percentToPoint(value, span);
+    };
 
     return entries.map(({ x, y, width, height, pageNumber, type }) => {
-        const absoluteX = percentToPoint(x, COORDINATE_REFERENCE_WIDTH);
-        const absoluteY = percentToPoint(y, COORDINATE_REFERENCE_HEIGHT);
-        console.log("data: " + absoluteY, COORDINATE_REFERENCE_HEIGHT)
-
+        const absoluteX = percentToPoint(x, referenceWidth);
+        const absoluteY = percentToPoint(y, referenceHeight);
+        const absoluteWidth = normalizeDimension(width, referenceWidth);
+        const absoluteHeight = normalizeDimension(height, referenceHeight);
         return {
             x: absoluteX,
             y: absoluteY,
-            width,
-            height,
+            width: absoluteWidth,
+            height: absoluteHeight,
             page: pageNumber ?? 1,
             type,
         };
