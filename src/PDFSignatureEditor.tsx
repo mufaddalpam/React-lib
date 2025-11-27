@@ -174,12 +174,11 @@ function PDFSignatureEditorInner({
 
         const pdfBytes = await currentPdfBlob.arrayBuffer();
         const pdfDoc = await PDFDocument.load(pdfBytes);
-        const firstPage = pdfDoc.getPages()[0];
-        const { width: actualPageWidth, height: actualPageHeight } = firstPage.getSize();
-        const remoteTargets = await fetchSignaturePositions(fetchConfig, templateId, {
-          width: actualPageWidth,
-          height: actualPageHeight,
+        const pageMetrics = pdfDoc.getPages().map((page) => {
+          const { width, height } = page.getSize();
+          return { width, height };
         });
+        const remoteTargets = await fetchSignaturePositions(fetchConfig, templateId, pageMetrics);
         if (isCancelled) return;
         setMetadataTargets(bucketizeMetadataTargets(remoteTargets));
         const remoteSignatureTargets = remoteTargets.filter(
@@ -732,7 +731,7 @@ function PDFSignatureEditorInner({
           target.width ?? SIGNATURE_DEFAULT_WIDTH,
           target.height ?? SIGNATURE_DEFAULT_HEIGHT
         );
-
+        console.log(target)
         page.drawImage(embeddedImage, {
           x: target.x,
           y: target.y,
@@ -1042,4 +1041,3 @@ export default function PDFSignatureEditor(props: PDFSignatureEditorProps) {
 }
 
 export { PDFSignatureEditor };
-

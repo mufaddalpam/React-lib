@@ -376,88 +376,104 @@ export async function submitSignedPdfToDocument(options: {
     }
     return json;
 }
-// export async function fetchSignaturePositions(fetchConfig: FetchConfig | undefined, templateId: string): Promise<ElementPosition[]> {
-//     if (!templateId) throw new Error("templateId is required to fetch signature positions");
-
-//     const response = await authedFetch(API_ENDPOINTS.ALL_COORDINATES(templateId), fetchConfig, {
-//         method: "GET",
-//         headers: { "Content-Type": "application/json" },
-//         // body: JSON.stringify({ templateId }),
-//     });
-
-//     const payload = (await readJson(response)) as CoordinatesApiResponse;
-//     if (!response.ok || payload?.success === false) {
-//         throw new Error(payload?.error || "Failed to fetch signature positions");
-//     }
-//     // console.log(payload);
-
-
-//     const entries = Array.isArray(payload?.data) ? payload.data : [];
-//     // console.log(entries);
-
-//     return entries.map(({ x, y, width, height, pageNumber, type }) => {
-//         const absoluteX = percentToPoint(x, COORDINATE_REFERENCE_WIDTH);
-//         const absoluteY = percentToPoint(y, COORDINATE_REFERENCE_HEIGHT);
-//         console.log("data: " + absoluteY, COORDINATE_REFERENCE_HEIGHT)
-
-//         return {
-//             x: absoluteX,
-//             y: absoluteY,
-//             width,
-//             height,
-//             page: pageNumber ?? 1,
-//             type,
-//         };
-//     });
-// }
 
 type PageMetrics = {
     width: number;
     height: number;
 };
 
-export async function fetchSignaturePositions(fetchConfig: FetchConfig | undefined, templateId: string, pageMetrics?: PageMetrics): Promise<ElementPosition[]> {
-    if (!templateId) throw new Error("templateId is required to fetch signature positions");
+
+export async function fetchSignaturePositions(
+    fetchConfig: FetchConfig | undefined,
+    templateId: string,
+    pageMetrics: PageMetrics[]
+): Promise<ElementPosition[]> {
 
     const response = await authedFetch(API_ENDPOINTS.ALL_COORDINATES(templateId), fetchConfig, {
         method: "GET",
         headers: { "Content-Type": "application/json" },
     });
 
-    const payload = (await readJson(response)) as CoordinatesApiResponse;
-    if (!response.ok || payload?.success === false) {
-        throw new Error(payload?.error || "Failed to fetch signature positions");
+    const payload = await readJson(response);
+    if (!response.ok) {
+        throw new Error(payload?.error || "Failed to fetch coordinates");
     }
 
-    const entries = Array.isArray(payload?.data) ? payload.data : [];
-    console.log('API Response Y values:', entries.map(e => ({ type: e.type, y: e.y })));
-    console.log('Reference height:', COORDINATE_REFERENCE_HEIGHT);
-    console.log('Converted Y:', entries.map(e => ({
-        type: e.type,
-        originalY: e.y,
-        fromBottom: 100 - e.y,
-        absolute: percentToPoint(e.y, COORDINATE_REFERENCE_HEIGHT)
-    })));
-    const referenceWidth = pageMetrics?.width ?? COORDINATE_REFERENCE_WIDTH;
-    const referenceHeight = pageMetrics?.height ?? COORDINATE_REFERENCE_HEIGHT;
+    const entries = payload?.data ?? [];
 
-    const normalizeDimension = (value: number | undefined, span: number): number | undefined => {
-        if (typeof value !== "number" || Number.isNaN(value)) return undefined;
-        if (value > 100) return value;
-        return percentToPoint(value, span);
+    // Percent → points conversion helper
+    const percentToPoint = (percent: number, total: number) => (percent / 100) * total;
+
+    // Height/width normalization
+    const normalizeDimension = (value: number | undefined, max: number) => {
+        if (typeof value !== "number") return undefined;
+
+        // Legacy % dimension
+        if (value <= 100) {
+            return percentToPoint(value, max);
+        }
+
+        // Already in points
+        return value;
     };
 
-    return entries.map(({ x, y, width, height, pageNumber, type }) => {
-        const absoluteX = percentToPoint(x, referenceWidth);
-        const absoluteY = percentToPoint(y, referenceHeight);
-        const absoluteWidth = normalizeDimension(width, referenceWidth);
-        const absoluteHeight = normalizeDimension(height, referenceHeight);
+    return entries.map((entry: {
+        x?: number,
+        y?: number,
+        width?: number,
+        height?: number,
+        pageNumber?: number,
+        type?: string,
+    }) => {
+        const { x = 0, y = 0, width, height, pageNumber, type } = entry;
+
+        const page = pageNumber ?? 1;
+        const pageIndex = page - 1;
+
+        const pdfWidth = pageMetrics[pageIndex]?.width;
+        const pdfHeight = pageMetrics[pageIndex]?.height;
+
+        if (!pdfWidth || !pdfHeight) {
+            throw new Error(`Missing page metrics for page ${page}`);
+        }
+
+        const isPercent = x <= 100 && y <= 100;
+
+        let absX: number;
+        let absY: number;
+        let absWidth: number | undefined;
+        let absHeight: number | undefined;
+
+        if (isPercent) {
+            // ---- Legacy percentages ----
+            absX = percentToPoint(x, pdfWidth);
+
+            // Convert top-left % → PDF bottom-left points
+            const topPx = percentToPoint(y, pdfHeight);
+            absHeight = normalizeDimension(height, pdfHeight);
+            const h = absHeight ?? 0;
+
+            absY = pdfHeight - topPx - h;
+
+        } else {
+            // ---- Already normalized points (0–1 normalized or real points) ----
+            absX = x * pdfWidth;
+            absY = y * pdfHeight;
+
+            absWidth = normalizeDimension(width, pdfWidth);
+            absHeight = normalizeDimension(height, pdfHeight);
+        }
+
+        // Ensure width/height are always normalized
+        absWidth = absWidth ?? normalizeDimension(width, pdfWidth);
+        absHeight = absHeight ?? normalizeDimension(height, pdfHeight);
+
         return {
-            x: absoluteX,
-            y: absoluteY,
-            width: absoluteWidth,
-            height: absoluteHeight,
-            page: pageNumber ?? 1,
+            x: absX,
+            y: absY,
+            width: absWidth,
+            height: absHeight,
+            page,
             type,
         };
     });
